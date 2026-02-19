@@ -4,573 +4,818 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShiftBoard</title>
-<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;700&family=Shippori+Mincho:wght@400;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&family=Shippori+Mincho:wght@600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: #f5f0ea;
-    color: #4a3f35;
-    font-family: 'Zen Maru Gothic', 'Hiragino Kaku Gothic ProN', sans-serif;
-    min-height: 100vh;
-  }
-  button { font-family: inherit; cursor: pointer; }
-  input { font-family: inherit; }
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
-  ::-webkit-scrollbar-track { background: #ede8e1; }
-  ::-webkit-scrollbar-thumb { background: #c9b9a8; border-radius: 3px; }
-  @media print {
-    body { background: #fff; color: #1e293b; padding: 20px; }
-    .no-print { display: none !important; }
-    table { font-size: 11px; }
-  }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{background:#f5f0ea;color:#4a3f35;font-family:'Zen Maru Gothic','Hiragino Kaku Gothic ProN',sans-serif;min-height:100vh;}
+button{font-family:inherit;cursor:pointer;}
+input,select,textarea{font-family:inherit;}
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-thumb{background:#d4c0b0;border-radius:3px;}
+.modal-overlay{position:fixed;inset:0;background:rgba(74,63,53,0.4);backdrop-filter:blur(3px);z-index:100;display:flex;align-items:center;justify-content:center;padding:16px;}
+.modal{background:#fff9f5;border-radius:20px;padding:24px;width:100%;max-width:640px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(74,63,53,0.2);}
+@media print{.no-print{display:none!important;}body{background:#fff;}}
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script>
-const { useState, useEffect, useRef } = React;
+const {useState,useEffect,useRef,useCallback,useMemo}=React;
 
-// ===================== 設定（ここを変更してください） =====================
-const ADMIN_PASSWORD = "admin1234"; // 管理者パスワード
-// ========================================================================
+// ==================== 設定 ====================
+const ADMIN_PW = "admin1234";
+const TIME_START = 10; // 10時
+const TIME_END = 18;   // 18時
+const SLOTS = [];
+for(let h=TIME_START;h<TIME_END;h++){SLOTS.push(`${h}:00`);SLOTS.push(`${h}:30`);}
+// ["10:00","10:30","11:00",...,"17:30"] 16コマ
 
-const SHIFT_TYPES = ["早番", "遅番", "どちらでも", "休み希望"];
-const CONFIRMED_TYPES = ["早番", "遅番", "出勤", "休み"];
-const SHIFT_COLORS = {
-  "早番": "#b07d62", "遅番": "#8c7aaa", "どちらでも": "#7a9e87", "休み希望": "#c4956a",
-  "確定-早番": "#b07d62", "確定-遅番": "#8c7aaa", "確定-出勤": "#7a9e87", "確定-休み": "#c47a7a",
+// ==================== ストレージ ====================
+const S={
+  get:(k)=>{try{const v=localStorage.getItem(k);return v!=null?JSON.parse(v):null;}catch{return null;}},
+  set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}},
 };
-const CONFIRMED_BG = { "早番": "#b07d6222", "遅番": "#8c7aaa22", "出勤": "#7a9e8722", "休み": "#c47a7a22" };
 
-function pad(n) { return String(n).padStart(2, "0"); }
-function getDays(year, month, holidays) {
-  const count = new Date(year, month + 1, 0).getDate();
-  return Array.from({ length: count }, (_, i) => {
-    const d = new Date(year, month, i + 1);
-    const w = d.getDay();
-    const dateStr = `${year}-${pad(month+1)}-${pad(i+1)}`;
-    const isWE = w === 0 || w === 6;
-    const holidayName = holidays ? holidays[dateStr] : null;
-    return { day: i+1, wd: ["日","月","火","水","木","金","土"][w], isWE, isHoliday: !!holidayName, holidayName, isRed: isWE || !!holidayName };
+// ==================== ユーティリティ ====================
+function pad(n){return String(n).padStart(2,"0");}
+function mkey(y,m){return `${y}-${pad(m+1)}`;}
+function dkey(y,m,d){return `${y}-${pad(m+1)}-${pad(d)}`;}
+function getDays(year,month,holidays={}){
+  const count=new Date(year,month+1,0).getDate();
+  return Array.from({length:count},(_,i)=>{
+    const d=new Date(year,month,i+1);
+    const w=d.getDay();
+    const dk=dkey(year,month,i+1);
+    const isWE=w===0||w===6;
+    const hname=holidays[dk]||null;
+    return{day:i+1,wd:["日","月","火","水","木","金","土"][w],isWE,isHoliday:!!hname,holidayName:hname,isRed:isWE||!!hname,dk};
   });
 }
-
-// 祝日キャッシュ（年単位）
-const holidayCache = {};
-async function fetchHolidays(year) {
-  if (holidayCache[year]) return holidayCache[year];
-  try {
-    const res = await fetch(`https://holidays-jp.github.io/api/v1/${year}/date.json`);
-    if (!res.ok) return {};
-    const data = await res.json();
-    holidayCache[year] = data;
-    return data;
-  } catch { return {}; }
+function slotToMinutes(slot){const[h,m]=slot.split(":").map(Number);return h*60+m;}
+function calcHours(startSlot,endSlot){
+  if(!startSlot||!endSlot)return 0;
+  const diff=slotToMinutes(endSlot)-slotToMinutes(startSlot);
+  return diff>0?diff/60:0;
 }
 
-// ローカルストレージをストレージとして使う（GitHub Pages用）
-const storage = {
-  get: (key) => {
-    try { const v = localStorage.getItem(key); return v !== null ? { value: v } : null; } catch { return null; }
-  },
-  set: (key, value) => {
-    try { localStorage.setItem(key, value); return true; } catch { return null; }
-  },
-  del: (key) => {
-    try { localStorage.removeItem(key); return true; } catch { return null; }
-  }
+// 祝日取得
+const holCache={};
+async function fetchHolidays(year){
+  if(holCache[year])return holCache[year];
+  try{const r=await fetch(`https://holidays-jp.github.io/api/v1/${year}/date.json`);if(!r.ok)return{};const d=await r.json();holCache[year]=d;return d;}
+  catch{return{};}
+}
+
+// ==================== カラー ====================
+const C={
+  bg:"#f5f0ea",card:"#fff9f5",border:"#e8ddd4",
+  text:"#4a3f35",muted:"#a08878",faint:"#c9b9a8",
+  primary:"#b07d62",primaryLight:"#b07d6222",
+  accent:"#8c7aaa",accentLight:"#8c7aaa22",
+  sage:"#7a9e87",sageLight:"#7a9e8722",
+  rose:"#c47a7a",roseLight:"#c47a7a22",
+  amber:"#c4956a",amberLight:"#c4956a22",
+  red:"#c47a7a",
+  shortfall:"#fde8e8", // 不足日背景
+  weekend:"#fdf0ee",
 };
+const F="'Zen Maru Gothic','Hiragino Kaku Gothic ProN',sans-serif";
 
-// ===================== スタイル定義 =====================
-const F = "'Zen Maru Gothic', 'Hiragino Kaku Gothic ProN', sans-serif";
-function s_btn(bg="#b07d62", ghost=false, sm=false) {
-  return {
-    padding: sm ? "4px 12px" : "9px 18px",
-    borderRadius: 20,
-    border: ghost ? `1px solid ${bg}` : "none",
-    background: ghost ? "transparent" : bg,
-    color: ghost ? bg : "#fff",
-    fontWeight: 700, fontSize: sm ? 12 : 13,
-    cursor: "pointer", fontFamily: F,
-    lineHeight: 1.4,
-    letterSpacing: "0.03em",
-  };
+function btn(bg=C.primary,ghost=false,sm=false){
+  return{padding:sm?"3px 10px":"8px 18px",borderRadius:20,border:ghost?`1.5px solid ${bg}`:"none",
+    background:ghost?"transparent":bg,color:ghost?bg:"#fff",fontWeight:700,fontSize:sm?11:13,
+    cursor:"pointer",fontFamily:F,lineHeight:1.4,letterSpacing:"0.02em",transition:"opacity .15s"};
 }
-const s_card = { background:"#fff9f5", border:"1px solid #e8ddd4", borderRadius:16, padding:"20px", boxShadow:"0 2px 12px rgba(180,150,120,0.08)" };
-const s_input = { background:"#fdf8f3", border:"1px solid #d9cfc5", borderRadius:10, padding:"9px 13px", color:"#4a3f35", fontSize:14, width:"100%", fontFamily:F };
-const s_th = { padding:"7px 4px", textAlign:"center", color:"#a08878", fontWeight:700, borderBottom:"1px solid #e8ddd4", whiteSpace:"nowrap", fontSize:12 };
-const s_td = { padding:"3px 2px", textAlign:"center", borderBottom:"1px solid #f0e8e0" };
-function s_chip(color, bg) { return { display:"inline-block", padding:"2px 7px", borderRadius:10, background:bg||color+"22", color, fontWeight:700, fontSize:11, border:`1px solid ${color}44` }; }
+const card={background:C.card,border:`1px solid ${C.border}`,borderRadius:16,padding:20,boxShadow:"0 2px 12px rgba(180,150,120,0.07)"};
+const inp={background:"#fdf8f3",border:`1px solid ${C.border}`,borderRadius:10,padding:"8px 12px",color:C.text,fontSize:13,fontFamily:F,width:"100%"};
+const th={padding:"6px 4px",textAlign:"center",color:C.muted,fontWeight:700,borderBottom:`1px solid ${C.border}`,fontSize:11,whiteSpace:"nowrap"};
+const td={padding:"3px 2px",textAlign:"center",borderBottom:`1px solid #f0e8e0`,fontSize:12};
 
-// ===================== コンポーネント =====================
+// ==================== メインアプリ ====================
+function App(){
+  const now=new Date();
+  const [mode,setMode]=useState("home");
+  const [year,setYear]=useState(now.getMonth()===11?now.getFullYear()+1:now.getFullYear());
+  const [month,setMonth]=useState((now.getMonth()+1)%12);
+  const [holidays,setHolidays]=useState({});
+  const [adminOk,setAdminOk]=useState(false);
 
-function MonthNav({ year, month, setYear, setMonth }) {
-  const prev = () => { const d = new Date(year, month - 1); setYear(d.getFullYear()); setMonth(d.getMonth()); };
-  const next = () => { const d = new Date(year, month + 1); setYear(d.getFullYear()); setMonth(d.getMonth()); };
-  return React.createElement("div", { style:{ display:"flex", gap:6, alignItems:"center" } },
-    React.createElement("span", { style:{ fontWeight:800, fontSize:15 } }, `${year}年${month+1}月`),
-    React.createElement("button", { style: s_btn("#c9b9a8",true,true), onClick: prev }, "◀"),
-    React.createElement("button", { style: s_btn("#c9b9a8",true,true), onClick: next }, "▶"),
-  );
-}
+  // データ
+  const [staffList,setStaffList]=useState(()=>S.get("staffList")||[]);
+  // staffList: [{id,name,hourlyWage,targetHours}]
+  const [requests,setRequests]=useState({});
+  // requests[mkey][staffId][dk] = {start,end} or null
+  const [shifts,setShifts]=useState({});
+  // shifts[mkey][dk] = {positions:[{name,required}], assigned:{staffId:{position,start,end}}}
+  const [published,setPublished]=useState({});
+  // published[mkey] = bool
+  const [deadline,setDeadline]=useState({});
+  // deadline[mkey] = "YYYY-MM-DD"
 
-function DeadlineBanner({ deadline }) {
-  if (!deadline) return null;
-  const dl = new Date(deadline);
-  const today = new Date(); today.setHours(0,0,0,0);
-  const diff = Math.ceil((dl - today) / 86400000);
-  const past = diff < 0;
-  const color = past ? "#f87171" : diff <= 3 ? "#c4956a" : "#7a9e87";
-  return React.createElement("div", {
-    style:{ display:"flex", alignItems:"center", gap:8, padding:"8px 14px", borderRadius:8,
-      background:color+"18", border:`1px solid ${color}44`, marginBottom:14, fontSize:13 }
-  },
-    React.createElement("span", { style:{ color, fontWeight:800 } }, "⏰"),
-    React.createElement("span", { style:{ color } },
-      past ? `締切超過（${deadline}）` : `希望締切：${deadline}　あと ${diff}日`
-    )
-  );
-}
-
-function App() {
-  const now = new Date();
-  const [mode, setMode] = useState("home");
-  const [year, setYear] = useState(now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear());
-  const [month, setMonth] = useState((now.getMonth() + 1) % 12);
-  const [staffName, setStaffName] = useState("");
-  const [nameInput, setNameInput] = useState("");
-  const [adminPass, setAdminPass] = useState("");
-  const [adminOk, setAdminOk] = useState(false);
-  const [adminErr, setAdminErr] = useState("");
-  const [adminTab, setAdminTab] = useState("requests");
-  const [requests, setRequests] = useState({});
-  const [confirmed, setConfirmed] = useState({});
-  const [published, setPublished] = useState(false);
-  const [staffList, setStaffList] = useState([]);
-  const [deadline, setDeadline] = useState("");
-  const [saveMsg, setSaveMsg] = useState("");
-  const [holidays, setHolidays] = useState({});
-
-  const mKey = `${year}-${pad(month + 1)}`;
-  const days = getDays(year, month, holidays);
+  const mk=useMemo(()=>mkey(year,month),[year,month]);
+  const days=useMemo(()=>getDays(year,month,holidays),[year,month,holidays]);
 
   // ロード
-  useEffect(() => {
-    const load = (key, setter, parse=true) => {
-      const r = storage.get(key);
-      if (r) { try { setter(parse ? JSON.parse(r.value) : r.value); } catch {} }
-    };
-    load(`req-${mKey}`, setRequests);
-    load(`conf-${mKey}`, setConfirmed);
-    load(`pub-${mKey}`, setPublished, false);
-    load(`deadline-${mKey}`, setDeadline, false);
-    load("stafflist", setStaffList);
-  }, [mKey]);
+  useEffect(()=>{
+    setRequests(S.get("requests")||{});
+    setShifts(S.get("shifts")||{});
+    setPublished(S.get("published")||{});
+    setDeadline(S.get("deadline")||{});
+  },[]);
 
-  // 祝日取得
-  useEffect(() => {
-    fetchHolidays(year).then(data => setHolidays(data));
-  }, [year]);
+  useEffect(()=>{fetchHolidays(year).then(setHolidays);},[year]);
 
-  function persist(patches) {
-    setSaveMsg("保存中…");
-    Object.entries(patches).forEach(([k,v]) => storage.set(k, v));
-    setSaveMsg("✓ 保存済み");
-    setTimeout(() => setSaveMsg(""), 1800);
+  // 保存ヘルパー
+  function saveRequests(v){setRequests(v);S.set("requests",v);}
+  function saveShifts(v){setShifts(v);S.set("shifts",v);}
+  function savePublished(v){setPublished(v);S.set("published",v);}
+  function saveDeadline(v){setDeadline(v);S.set("deadline",v);}
+  function saveStaff(v){setStaffList(v);S.set("staffList",v);}
+
+  // 希望更新
+  function updateRequest(staffId,dk,val){
+    const next={...requests,[mk]:{...(requests[mk]||{}),[staffId]:{...((requests[mk]||{})[staffId]||{}),[dk]:val}}};
+    if(!val)delete next[mk][staffId][dk];
+    saveRequests(next);
+  }
+  // シフト更新
+  function updateShift(dk,val){
+    const next={...shifts,[mk]:{...(shifts[mk]||{}),[dk]:val}};
+    saveShifts(next);
   }
 
-  function setR(v) { setRequests(v); persist({ [`req-${mKey}`]: JSON.stringify(v) }); }
-  function setC(v) { setConfirmed(v); persist({ [`conf-${mKey}`]: JSON.stringify(v) }); }
-  function setPub(v) { setPublished(v); persist({ [`pub-${mKey}`]: String(v) }); }
-  function setDL(v) { setDeadline(v); persist({ [`deadline-${mKey}`]: v }); }
-  function setSL(v) { setStaffList(v); persist({ stafflist: JSON.stringify(v) }); }
+  // 月のシフトデータ取得
+  const mkShifts=shifts[mk]||{};
+  const mkRequests=requests[mk]||{};
+  const mkPublished=!!published[mk];
+  const mkDeadline=deadline[mk]||"";
 
-  const names = Array.from(new Set([...staffList, ...Object.keys(requests)]));
-
-  function toggleReq(day, type) {
-    const k = `${mKey}-${pad(day)}`;
-    const cur = (requests[staffName] || {})[k];
-    const upd = { ...requests, [staffName]: { ...(requests[staffName] || {}), [k]: cur === type ? undefined : type } };
-    if (!upd[staffName][k]) delete upd[staffName][k];
-    setR(upd);
-  }
-  function toggleConf(name, day, type) {
-    const k = `${mKey}-${pad(day)}`;
-    const cur = (confirmed[name] || {})[k];
-    const upd = { ...confirmed, [name]: { ...(confirmed[name] || {}), [k]: cur === type ? undefined : type } };
-    if (!upd[name][k]) delete upd[name][k];
-    setC(upd);
-  }
-  function removeStaff(name) {
-    if (!window.confirm(`「${name}」を削除しますか？\n希望・確定データも消えます。`)) return;
-    const newList = staffList.filter(n => n !== name);
-    const newReq = { ...requests }; delete newReq[name];
-    const newConf = { ...confirmed }; delete newConf[name];
-    setSL(newList); setR(newReq); setC(newConf);
-  }
-  function addStaff(name) {
-    if (!name.trim() || staffList.includes(name.trim())) return false;
-    setSL([...staffList, name.trim()]);
-    return true;
+  // 不足チェック: その日のassigned数 < positionsの合計required
+  function isShortfall(dk){
+    const dayShift=mkShifts[dk];
+    if(!dayShift||!dayShift.positions||dayShift.positions.length===0)return false;
+    const required=dayShift.positions.reduce((s,p)=>s+(p.required||0),0);
+    const assigned=Object.keys(dayShift.assigned||{}).length;
+    return assigned<required;
   }
 
-  function handlePrint() {
-    const printNames = names;
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<title>${year}年${month+1}月 シフト表</title>
-<style>
-  body{font-family:'Hiragino Kaku Gothic ProN','Meiryo',sans-serif;padding:20px;color:#1e293b;font-size:12px;}
-  h1{font-size:16px;margin-bottom:4px;}
-  .dl{font-size:11px;color:#64748b;margin-bottom:14px;}
-  table{border-collapse:collapse;width:100%;}
-  th{background:#7a6055;color:#fff;padding:5px 4px;text-align:center;font-size:11px;}
-  td{border:1px solid #e2e8f0;padding:4px 3px;text-align:center;}
-  .we{background:#fff7ed;}
-  .sun{color:#dc2626;font-weight:bold;}
-  .sat{color:#2563eb;font-weight:bold;}
-  .chip{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:bold;}
-  .早番{background:#e0f2fe;color:#0369a1}
-  .遅番{background:#ede9fe;color:#6d28d9}
-  .出勤{background:#dcfce7;color:#166534}
-  .休み{background:#fee2e2;color:#991b1b}
-  .footer{font-size:10px;color:#94a3b8;margin-top:10px;}
-</style></head><body>
-<h1>${year}年${month+1}月 シフト表</h1>
-${deadline ? `<div class="dl">希望締切：${deadline}</div>` : ""}
-<table>
-<tr><th>日</th><th>曜</th>${printNames.map(n=>`<th>${n}</th>`).join("")}</tr>
-${days.map(({day,wd,isWE,isRed,isHoliday,holidayName})=>{
-  const k = `${mKey}-${pad(day)}`;
-  const wClass = isRed?"sun":"";
-  const holText = holidayName ? ` <span style="font-size:9px;color:#c47a7a">${holidayName}</span>` : "";
-  return `<tr class="${isRed?"we":""}">
-    <td class="${wClass}" style="font-weight:bold">${day}${holText}</td>
-    <td class="${wClass}">${wd}</td>
-    ${printNames.map(n=>{
-      const c = (confirmed[n]||{})[k];
-      return `<td>${c?`<span class="chip ${c}">${c}</span>`:""}</td>`;
-    }).join("")}
-  </tr>`;
-}).join("")}
-</table>
-<div class="footer">出力日：${new Date().toLocaleDateString("ja-JP")}</div>
-</body></html>`;
-    const w = window.open("", "_blank");
-    w.document.write(html);
-    w.document.close();
-    setTimeout(() => { w.focus(); w.print(); }, 500);
+  // スタッフ別月間勤務時間・給与
+  function staffMonthStats(staffId){
+    let totalHours=0;
+    days.forEach(({dk})=>{
+      const dayShift=mkShifts[dk];
+      if(!dayShift||!dayShift.assigned)return;
+      const a=dayShift.assigned[staffId];
+      if(a)totalHours+=calcHours(a.start,a.end);
+    });
+    const staff=staffList.find(s=>s.id===staffId);
+    const wage=staff?staff.hourlyWage||0:0;
+    return{totalHours,totalPay:Math.floor(totalHours*wage)};
   }
 
-  const wrap = { maxWidth:960, margin:"0 auto", padding:"20px 16px" };
-  const nav = { display:"flex", gap:8, alignItems:"center", marginBottom:18, flexWrap:"wrap" };
+  const props={mode,setMode,year,setYear,month,setMonth,mk,days,holidays,
+    staffList,saveStaff,requests:mkRequests,shifts:mkShifts,published:mkPublished,deadline:mkDeadline,
+    saveRequests,saveShifts,savePublished,saveDeadline,
+    updateRequest,updateShift,isShortfall,staffMonthStats,
+    adminOk,setAdminOk};
 
-  // ==================== HOME ====================
-  if (mode === "home") return React.createElement("div", { style:{ minHeight:"100vh", background:"#f5f0ea" } },
-    React.createElement("div", { style: wrap },
-      React.createElement("div", { style:{ paddingTop:52, textAlign:"center", marginBottom:48 } },
-        React.createElement("div", { style:{ fontSize:11, letterSpacing:6, color:"#c4b0a0", textTransform:"uppercase", marginBottom:10 } }, "Shift Management"),
-        React.createElement("div", { style:{ fontSize:34, fontWeight:700, letterSpacing:"-0.5px", fontFamily:"'Shippori Mincho', serif", background:"linear-gradient(120deg,#b07d62 0%,#8c7aaa 55%,#c4956a 100%)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", marginBottom:6 } }, "ShiftBoard"),
-        React.createElement("div", { style:{ fontSize:13, color:"#8a7a70" } }, "希望収集から公開まで、ブラウザだけで完結"),
-        React.createElement("div", { style:{ display:"flex", gap:12, justifyContent:"center", flexWrap:"wrap", marginTop:32 } },
-          React.createElement("button", { style:{ ...s_btn("#b07d62"), padding:"12px 24px", fontSize:14 }, onClick:()=>setMode("nameInput") }, "📝  希望を入力する"),
-          React.createElement("button", { style:{ ...s_btn("#8c7aaa"), padding:"12px 24px", fontSize:14 }, onClick:()=>setMode("view") }, "📅  シフトを見る"),
-          React.createElement("button", { style:{ ...s_btn("#7a9e87"), padding:"12px 24px", fontSize:14 }, onClick:()=>setMode("adminLogin") }, "🔐  管理者"),
-        )
+  if(mode==="home")return React.createElement(Home,props);
+  if(mode==="nameInput")return React.createElement(NameInput,props);
+  if(mode.startsWith("staff|"))return React.createElement(StaffInput,props);
+  if(mode==="adminLogin")return React.createElement(AdminLogin,props);
+  if(mode==="admin")return React.createElement(AdminPanel,props);
+  if(mode==="view")return React.createElement(PublicView,props);
+  return null;
+}
+
+// ==================== 共通コンポーネント ====================
+function MonthNav({year,month,setYear,setMonth,style={}}){
+  return React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center",...style}},
+    React.createElement("span",{style:{fontWeight:800,fontSize:15,fontFamily:"'Shippori Mincho',serif"}},[year,"年",month+1,"月"]),
+    React.createElement("button",{style:btn(C.faint,true,true),onClick:()=>{const d=new Date(year,month-1);setYear(d.getFullYear());setMonth(d.getMonth());}},"◀"),
+    React.createElement("button",{style:btn(C.faint,true,true),onClick:()=>{const d=new Date(year,month+1);setYear(d.getFullYear());setMonth(d.getMonth());}},"▶"),
+  );
+}
+function DeadlineBanner({deadline}){
+  if(!deadline)return null;
+  const diff=Math.ceil((new Date(deadline)-new Date().setHours(0,0,0,0))/86400000);
+  const past=diff<0;
+  const col=past?C.rose:diff<=3?C.amber:C.sage;
+  return React.createElement("div",{style:{padding:"7px 14px",borderRadius:8,background:col+"22",border:`1px solid ${col}44`,fontSize:12,color:col,marginBottom:12}},
+    "⏰ ",past?`締切超過（${deadline}）`:`希望締切：${deadline}　あと${diff}日`
+  );
+}
+function Wrap({children,style={}}){
+  return React.createElement("div",{style:{maxWidth:1100,margin:"0 auto",padding:"16px",...style}},children);
+}
+function BackBtn({onClick}){
+  return React.createElement("button",{style:{...btn(C.faint,true,true),marginBottom:14},onClick},"← 戻る");
+}
+
+// ==================== HOME ====================
+function Home({setMode}){
+  return React.createElement("div",{style:{minHeight:"100vh",background:C.bg}},
+    React.createElement(Wrap,null,
+      React.createElement("div",{style:{textAlign:"center",paddingTop:52,marginBottom:44}},
+        React.createElement("div",{style:{fontSize:10,letterSpacing:6,color:C.faint,textTransform:"uppercase",marginBottom:8}},"Shift Management"),
+        React.createElement("div",{style:{fontSize:36,fontWeight:600,fontFamily:"'Shippori Mincho',serif",background:`linear-gradient(120deg,${C.primary} 0%,${C.accent} 55%,${C.amber} 100%)`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:4}},"ShiftBoard"),
+        React.createElement("div",{style:{fontSize:12,color:C.muted}},"希望収集から給与管理まで"),
       ),
-      React.createElement("div", { style: s_card },
-        React.createElement("div", { style:{ fontSize:12, color:"#8a7a70", lineHeight:2.2 } },
-          "① スタッフが「希望を入力する」から名前を選んで希望を登録", React.createElement("br"),
-          "② 管理者がシフトを確定して公開", React.createElement("br"),
-          "③ 「シフトを見る」で全員分を確認", React.createElement("br"),
-          React.createElement("span", { style:{ color:"#c9b9a8", fontSize:11 } }, "※ このページのURLをLINEグループに貼るだけでスタッフ全員が使えます")
-        )
+      React.createElement("div",{style:{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:36}},
+        React.createElement("button",{style:{...btn(C.primary),padding:"12px 28px",fontSize:14},onClick:()=>setMode("nameInput")},"📝 希望を入力する"),
+        React.createElement("button",{style:{...btn(C.accent),padding:"12px 28px",fontSize:14},onClick:()=>setMode("view")},"📅 シフトを見る"),
+        React.createElement("button",{style:{...btn(C.sage),padding:"12px 28px",fontSize:14},onClick:()=>setMode("adminLogin")},"🔐 管理者"),
+      ),
+      React.createElement("div",{style:{...card,fontSize:12,color:C.muted,lineHeight:2.2}},
+        "① スタッフが希望時間（30分刻み）を入力",React.createElement("br"),
+        "② 管理者がカレンダーでシフトを確定・ポジション割り当て",React.createElement("br"),
+        "③ 公開後、スタッフが確認",React.createElement("br"),
+        React.createElement("span",{style:{fontSize:11,color:C.faint}},"※ このURLをLINEグループに共有してください"),
       )
     )
   );
+}
 
-  // ==================== NAME INPUT ====================
-  if (mode === "nameInput") return React.createElement("div", { style:{ minHeight:"100vh", background:"#f5f0ea" } },
-    React.createElement("div", { style: wrap },
-      React.createElement("button", { style:{ ...s_btn("#c9b9a8",true,true), marginBottom:16 }, onClick:()=>setMode("home") }, "← 戻る"),
-      React.createElement(DeadlineBanner, { deadline }),
-      React.createElement("div", { style: s_card },
-        React.createElement("div", { style:{ fontWeight:800, fontSize:16, marginBottom:16 } }, "名前を選ぶ・入力する"),
-        staffList.length > 0 && React.createElement("div", { style:{ marginBottom:16 } },
-          React.createElement("div", { style:{ fontSize:12, color:"#a08878", marginBottom:8 } }, "メンバー一覧"),
-          React.createElement("div", { style:{ display:"flex", gap:8, flexWrap:"wrap" } },
-            staffList.map(n => React.createElement("button", {
-              key:n,
-              style:{ ...s_btn(staffName===n?"#b07d62":"#b09080", staffName!==n, true), border:`1px solid ${staffName===n?"#b07d62":"#d4c0b0"}` },
-              onClick:()=>{ setStaffName(n); setMode("staff"); }
-            }, n))
+// ==================== NAME INPUT ====================
+function NameInput({setMode,staffList,mode}){
+  const [input,setInput]=useState("");
+  return React.createElement("div",{style:{minHeight:"100vh",background:C.bg}},
+    React.createElement(Wrap,null,
+      React.createElement(BackBtn,{onClick:()=>setMode("home")}),
+      React.createElement("div",{style:card},
+        React.createElement("div",{style:{fontWeight:800,fontSize:16,marginBottom:16}},"名前を選ぶ"),
+        staffList.length>0&&React.createElement("div",{style:{marginBottom:16}},
+          React.createElement("div",{style:{fontSize:11,color:C.muted,marginBottom:8}},"メンバー一覧"),
+          React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+            staffList.map(s=>React.createElement("button",{key:s.id,
+              style:{...btn(C.primary,false,true),padding:"6px 16px",fontSize:13},
+              onClick:()=>setMode("staff|"+s.id)
+            },s.name))
           )
         ),
-        React.createElement("div", { style:{ display:"flex", gap:8, marginTop:8 } },
-          React.createElement("input", {
-            style: s_input,
-            placeholder:"一覧にない場合はここに入力",
-            value: nameInput,
-            onChange: e => setNameInput(e.target.value),
-            onKeyDown: e => {
-              if (e.key === "Enter" && nameInput.trim()) {
-                addStaff(nameInput.trim());
-                setStaffName(nameInput.trim());
-                setMode("staff");
-              }
-            }
-          }),
-          React.createElement("button", {
-            style: s_btn("#b07d62"),
-            onClick:()=>{ if(!nameInput.trim()) return; addStaff(nameInput.trim()); setStaffName(nameInput.trim()); setMode("staff"); }
-          }, "→")
-        ),
-        React.createElement("div", { style:{ fontSize:11, color:"#8a7a70", marginTop:8 } }, "※ 管理者が追加したメンバーが一覧に表示されます")
+        React.createElement("div",{style:{fontSize:11,color:C.faint}},"※ 名前がない場合は管理者に追加を依頼してください")
       )
     )
   );
+}
 
-  // ==================== STAFF INPUT ====================
-  if (mode === "staff") {
-    const myReqs = requests[staffName] || {};
-    return React.createElement("div", { style:{ minHeight:"100vh", background:"#f5f0ea" } },
-      React.createElement("div", { style: wrap },
-        React.createElement("div", { style: nav },
-          React.createElement("button", { style: s_btn("#c9b9a8",true,true), onClick:()=>setMode("nameInput") }, "← 戻る"),
-          React.createElement(MonthNav, { year, month, setYear, setMonth }),
-          React.createElement("span", { style:{ marginLeft:"auto", fontSize:13, color:"#b07d62", fontWeight:700 } }, `${staffName} さん`),
-          saveMsg && React.createElement("span", { style:{ fontSize:12, color:"#7a9e87" } }, saveMsg),
-        ),
-        React.createElement(DeadlineBanner, { deadline }),
-        React.createElement("div", { style: s_card },
-          React.createElement("div", { style:{ fontSize:12, color:"#a08878", marginBottom:12 } }, "タップで選択、もう一度で解除。入力内容は自動保存されます。"),
-          React.createElement("div", { style:{ overflowX:"auto" } },
-            React.createElement("table", { style:{ borderCollapse:"collapse", width:"100%", fontSize:12 } },
-              React.createElement("thead", null,
-                React.createElement("tr", null,
-                  React.createElement("th", { style:{ ...s_th, textAlign:"left", minWidth:28 } }, "日"),
-                  React.createElement("th", { style: s_th }, "曜"),
-                  SHIFT_TYPES.map(t => React.createElement("th", { key:t, style: s_th }, t))
-                )
-              ),
-              React.createElement("tbody", null,
-                days.map(({day,wd,isWE,isRed,isHoliday,holidayName}) => {
-                  const k = `${mKey}-${pad(day)}`;
-                  const cur = myReqs[k];
-                  return React.createElement("tr", { key:day, style:{ background: isRed?"#fdf0ee":"transparent" } },
-                    React.createElement("td", { title: holidayName||"", style:{ ...s_td, fontWeight:700, color:isRed?"#c47a7a":"#4a3f35" } }, day + (isHoliday?"🎌":"")),
-                    React.createElement("td", { style:{ ...s_td, fontSize:11, color:isRed?"#c47a7a":"#a08878" } }, wd),
-                    SHIFT_TYPES.map(t => {
-                      const active = cur === t;
-                      const col = SHIFT_COLORS[t];
-                      return React.createElement("td", { key:t, style: s_td },
-                        React.createElement("span", {
-                          onClick:()=>toggleReq(day,t),
-                          style:{
-                            display:"inline-block", padding:"3px 8px", borderRadius:5, cursor:"pointer",
-                            background: active ? col+"33" : "transparent",
-                            border: `1px solid ${active ? col : "transparent"}`,
-                            color: active ? col : "#c9b9a8",
-                            fontWeight: active ? 700 : 400, fontSize:11, transition:"all 0.1s",
-                          }
-                        }, t)
-                      );
-                    })
-                  );
-                })
+// ==================== STAFF INPUT ====================
+function StaffInput(props){
+  const {mode,setMode,mk,days,staffList,requests,updateRequest,deadline}=props;
+  const staffId=mode.split("|")[1];
+  const staff=staffList.find(s=>s.id===staffId);
+  const myReq=requests[staffId]||{};
+  const [dragStart,setDragStart]=useState(null);
+  const [selectDay,setSelectDay]=useState(null);
+
+  if(!staff)return React.createElement("div",{style:{padding:20}},"スタッフが見つかりません");
+
+  function setDayRequest(dk,start,end){
+    updateRequest(staffId,dk,start&&end?{start,end}:null);
+  }
+
+  return React.createElement("div",{style:{minHeight:"100vh",background:C.bg}},
+    React.createElement(Wrap,null,
+      React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:14,flexWrap:"wrap"}},
+        React.createElement(BackBtn,{onClick:()=>setMode("nameInput")}),
+        React.createElement(MonthNav,{year:props.year,month:props.month,setYear:props.setYear,setMonth:props.setMonth}),
+        React.createElement("span",{style:{marginLeft:"auto",fontWeight:700,color:C.primary,fontSize:13}},staff.name+" さん"),
+      ),
+      React.createElement(DeadlineBanner,{deadline}),
+      React.createElement("div",{style:{...card}},
+        React.createElement("div",{style:{fontSize:12,color:C.muted,marginBottom:14}},"各日の出勤可能な開始・終了時間を選んでください（30分刻み）"),
+        React.createElement("div",{style:{overflowX:"auto"}},
+          React.createElement("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12}},
+            React.createElement("thead",null,
+              React.createElement("tr",null,
+                React.createElement("th",{style:{...th,textAlign:"left",minWidth:36}},"日"),
+                React.createElement("th",{style:th},"曜"),
+                React.createElement("th",{style:{...th,minWidth:100}},"開始"),
+                React.createElement("th",{style:{...th,minWidth:100}},"終了"),
+                React.createElement("th",{style:{...th,minWidth:60}},"時間"),
+                React.createElement("th",{style:{...th,minWidth:60}},"操作"),
               )
+            ),
+            React.createElement("tbody",null,
+              days.map(({day,wd,isRed,dk,holidayName})=>{
+                const req=myReq[dk];
+                const hours=req?calcHours(req.start,req.end):0;
+                const rowBg=isRed?"#fdf0ee":"transparent";
+                return React.createElement("tr",{key:dk,style:{background:rowBg}},
+                  React.createElement("td",{style:{...td,fontWeight:700,color:isRed?C.rose:C.text},title:holidayName||""},day+(isRed&&holidayName?"🎌":"")),
+                  React.createElement("td",{style:{...td,color:isRed?C.rose:C.muted}},wd),
+                  React.createElement("td",{style:td},
+                    React.createElement("select",{style:{...inp,padding:"4px 6px",width:90},value:req?.start||"",
+                      onChange:e=>setDayRequest(dk,e.target.value,req?.end||"")},
+                      React.createElement("option",{value:""},"--"),
+                      SLOTS.map(s=>React.createElement("option",{key:s,value:s},s))
+                    )
+                  ),
+                  React.createElement("td",{style:td},
+                    React.createElement("select",{style:{...inp,padding:"4px 6px",width:90},value:req?.end||"",
+                      onChange:e=>setDayRequest(dk,req?.start||"",e.target.value)},
+                      React.createElement("option",{value:""},"--"),
+                      SLOTS.filter(s=>!req?.start||slotToMinutes(s)>slotToMinutes(req.start))
+                        .map(s=>React.createElement("option",{key:s,value:s},s)),
+                      React.createElement("option",{value:"18:00"},"18:00")
+                    )
+                  ),
+                  React.createElement("td",{style:{...td,color:hours>0?C.sage:C.faint,fontWeight:hours>0?700:400}},
+                    hours>0?hours+"h":"—"
+                  ),
+                  React.createElement("td",{style:td},
+                    req&&React.createElement("button",{style:btn(C.rose,false,true),onClick:()=>setDayRequest(dk,null,null)},"✕")
+                  ),
+                );
+              })
             )
           )
-        )
+        ),
+        React.createElement("div",{style:{marginTop:12,fontSize:11,color:C.faint}},"✓ 自動保存されます")
+      )
+    )
+  );
+}
+
+// ==================== ADMIN LOGIN ====================
+function AdminLogin({setMode,adminOk,setAdminOk}){
+  const [pw,setPw]=useState("");
+  const [err,setErr]=useState("");
+  if(adminOk){setMode("admin");return null;}
+  return React.createElement("div",{style:{minHeight:"100vh",background:C.bg}},
+    React.createElement(Wrap,null,
+      React.createElement(BackBtn,{onClick:()=>setMode("home")}),
+      React.createElement("div",{style:{...card,maxWidth:360}},
+        React.createElement("div",{style:{fontWeight:800,fontSize:16,marginBottom:16}},"管理者ログイン"),
+        React.createElement("input",{style:inp,type:"password",placeholder:"パスワード",value:pw,
+          onChange:e=>setPw(e.target.value),
+          onKeyDown:e=>{if(e.key==="Enter"){if(pw===ADMIN_PW){setAdminOk(true);setMode("admin");}else setErr("パスワードが違います");}}}),
+        err&&React.createElement("div",{style:{color:C.rose,fontSize:12,marginTop:6}},err),
+        React.createElement("button",{style:{...btn(C.sage),marginTop:12,width:"100%"},
+          onClick:()=>{if(pw===ADMIN_PW){setAdminOk(true);setMode("admin");}else setErr("パスワードが違います");}},"ログイン"),
+        React.createElement("div",{style:{fontSize:11,color:C.faint,marginTop:8}},"初期PW: admin1234")
+      )
+    )
+  );
+}
+
+// ==================== ADMIN PANEL ====================
+function AdminPanel(props){
+  const {setMode,setAdminOk,mk,days,staffList,saveStaff,requests,shifts,year,month,setYear,setMonth,
+    savePublished,saveDeadline,updateShift,isShortfall,staffMonthStats,
+    published,deadline,fullDeadline,fullPublished}=props;
+  const [tab,setTab]=useState("calendar");
+  const [saveMsg,setSaveMsg]=useState("");
+  const [selectedDay,setSelectedDay]=useState(null); // dk
+  const [dlInput,setDlInput]=useState(deadline||"");
+
+  useEffect(()=>setDlInput(deadline||""),[deadline,mk]);
+
+  function doSave(msg="✓"){setSaveMsg(msg);setTimeout(()=>setSaveMsg(""),1800);}
+
+  // カレンダータブ
+  function CalendarTab(){
+    // 月カレンダー（7列グリッド）
+    const firstDow=new Date(year,month,1).getDay();
+    const cells=[];
+    for(let i=0;i<firstDow;i++)cells.push(null);
+    days.forEach(d=>cells.push(d));
+    while(cells.length%7!==0)cells.push(null);
+
+    return React.createElement("div",null,
+      React.createElement("div",{style:{fontSize:12,color:C.muted,marginBottom:12}},"日付をクリックしてシフトを編集　",
+        React.createElement("span",{style:{display:"inline-block",width:10,height:10,background:C.shortfall,border:`1px solid ${C.rose}`,borderRadius:2,marginRight:4}}),
+        "必要人数不足"
+      ),
+      React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4}},
+        ["日","月","火","水","木","金","土"].map(w=>
+          React.createElement("div",{key:w,style:{textAlign:"center",fontSize:11,fontWeight:700,color:w==="日"||w==="土"?C.rose:C.muted,padding:"4px 0"}},w)
+        ),
+        cells.map((cell,i)=>{
+          if(!cell)return React.createElement("div",{key:"e"+i});
+          const {day,dk,isRed,isHoliday,holidayName}=cell;
+          const dayShift=shifts[dk]||{};
+          const assigned=Object.keys(dayShift.assigned||{}).length;
+          const required=(dayShift.positions||[]).reduce((s,p)=>s+(p.required||0),0);
+          const shortage=isShortfall(dk);
+          const hasData=assigned>0||required>0;
+          return React.createElement("div",{key:dk,
+            onClick:()=>setSelectedDay(dk),
+            style:{
+              background:shortage?C.shortfall:isRed?"#fdf0ee":C.card,
+              border:`1.5px solid ${selectedDay===dk?C.primary:shortage?C.rose:C.border}`,
+              borderRadius:10,padding:"6px 4px",cursor:"pointer",minHeight:64,
+              transition:"border-color .15s",position:"relative",
+            }},
+            React.createElement("div",{style:{fontWeight:700,fontSize:13,color:isRed?C.rose:C.text}},day,(isHoliday?"🎌":"")),
+            hasData&&React.createElement("div",{style:{fontSize:10,color:shortage?C.rose:C.sage,marginTop:2}},
+              assigned+"/"+required+"人"
+            ),
+            required>0&&React.createElement("div",{style:{fontSize:9,color:C.muted,marginTop:1}},
+              (dayShift.positions||[]).map(p=>p.name).join(" ")
+            ),
+          );
+        })
+      ),
+      selectedDay&&React.createElement(DayEditor,{dk:selectedDay,shifts,updateShift,staffList,requests,doSave,onClose:()=>setSelectedDay(null)})
+    );
+  }
+
+  // スタッフ管理タブ
+  function StaffTab(){
+    const [nName,setNName]=useState("");
+    const [nWage,setNWage]=useState("");
+    const [nTarget,setNTarget]=useState("");
+    return React.createElement("div",null,
+      React.createElement("div",{style:{fontWeight:700,marginBottom:14}},"スタッフ一覧"),
+      staffList.length===0&&React.createElement("div",{style:{color:C.muted,fontSize:13,marginBottom:16}},"スタッフがいません"),
+      React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:8,marginBottom:20}},
+        staffList.map(s=>{
+          const {totalHours,totalPay}=staffMonthStats(s.id);
+          return React.createElement("div",{key:s.id,style:{...card,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",padding:"12px 16px"}},
+            React.createElement("div",{style:{flex:1,minWidth:80}},
+              React.createElement("div",{style:{fontWeight:700,fontSize:14}},s.name),
+              React.createElement("div",{style:{fontSize:11,color:C.muted}},`時給 ${s.hourlyWage||0}円 / 目標 ${s.targetHours||0}h`),
+            ),
+            React.createElement("div",{style:{fontSize:12,color:C.text,textAlign:"right"}},
+              React.createElement("div",null,`${year}/${month+1}: `,React.createElement("b",null,totalHours.toFixed(1)+"h")),
+              React.createElement("div",{style:{color:C.primary,fontWeight:700}},totalPay.toLocaleString()+"円"),
+              s.targetHours>0&&React.createElement("div",{style:{fontSize:10,color:totalHours>=s.targetHours?C.sage:C.amber}},
+                `目標 ${s.targetHours}h ${totalHours>=s.targetHours?"✓達成":"(未達)"}`)
+            ),
+            React.createElement("div",{style:{display:"flex",gap:6}},
+              React.createElement("button",{style:btn(C.rose,false,true),
+                onClick:()=>{if(window.confirm(`「${s.name}」を削除しますか？`))saveStaff(staffList.filter(x=>x.id!==s.id));}
+              },"削除"),
+            )
+          );
+        })
+      ),
+      React.createElement("div",{style:{fontWeight:700,marginBottom:10,fontSize:13}},"スタッフを追加"),
+      React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}},
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:11,color:C.muted,marginBottom:4}},"名前"),
+          React.createElement("input",{style:{...inp,width:120},placeholder:"名前",value:nName,onChange:e=>setNName(e.target.value)})
+        ),
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:11,color:C.muted,marginBottom:4}},"時給（円）"),
+          React.createElement("input",{style:{...inp,width:90},placeholder:"1000",type:"number",value:nWage,onChange:e=>setNWage(e.target.value)})
+        ),
+        React.createElement("div",null,
+          React.createElement("div",{style:{fontSize:11,color:C.muted,marginBottom:4}},"月目標時間"),
+          React.createElement("input",{style:{...inp,width:90},placeholder:"80",type:"number",value:nTarget,onChange:e=>setNTarget(e.target.value)})
+        ),
+        React.createElement("button",{style:btn(C.primary),
+          onClick:()=>{
+            if(!nName.trim())return;
+            saveStaff([...staffList,{id:Date.now().toString(),name:nName.trim(),hourlyWage:Number(nWage)||0,targetHours:Number(nTarget)||0}]);
+            setNName("");setNWage("");setNTarget("");
+          }
+        },"追加"),
       )
     );
   }
 
-  // ==================== ADMIN LOGIN ====================
-  if (mode === "adminLogin" && !adminOk) return React.createElement("div", { style:{ minHeight:"100vh", background:"#f5f0ea" } },
-    React.createElement("div", { style: wrap },
-      React.createElement("button", { style:{ ...s_btn("#c9b9a8",true,true), marginBottom:16 }, onClick:()=>setMode("home") }, "← 戻る"),
-      React.createElement("div", { style: s_card },
-        React.createElement("div", { style:{ fontWeight:800, fontSize:16, marginBottom:16 } }, "管理者ログイン"),
-        React.createElement("input", {
-          style: s_input, type:"password", placeholder:"パスワード", value: adminPass,
-          onChange: e => setAdminPass(e.target.value),
-          onKeyDown: e => { if(e.key==="Enter"){ if(adminPass===ADMIN_PASSWORD){setAdminOk(true);setAdminErr("");}else setAdminErr("パスワードが違います"); }}
-        }),
-        adminErr && React.createElement("div", { style:{ color:"#c47a7a", fontSize:13, marginTop:8 } }, adminErr),
-        React.createElement("button", {
-          style:{ ...s_btn("#7a9e87"), marginTop:14, width:"100%" },
-          onClick:()=>{ if(adminPass===ADMIN_PASSWORD){setAdminOk(true);setAdminErr("");}else setAdminErr("パスワードが違います"); }
-        }, "ログイン"),
-        React.createElement("div", { style:{ marginTop:10, fontSize:11, color:"#c9b9a8" } }, "初期PW: admin1234（HTMLファイル内 ADMIN_PASSWORD で変更）")
+  // 希望一覧タブ
+  function RequestsTab(){
+    return React.createElement("div",null,
+      React.createElement("div",{style:{fontSize:12,color:C.muted,marginBottom:14}},"スタッフの希望時間一覧"),
+      staffList.length===0&&React.createElement("div",{style:{color:C.muted,fontSize:13}},"スタッフがいません"),
+      staffList.map(s=>{
+        const myReq=requests[s.id]||{};
+        const submitted=Object.entries(myReq).filter(([dk,v])=>v&&dk.startsWith(mk.slice(0,7)));
+        const totalH=submitted.reduce((sum,[,v])=>sum+calcHours(v.start,v.end),0);
+        return React.createElement("div",{key:s.id,style:{marginBottom:20}},
+          React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:6}},
+            React.createElement("span",{style:{fontWeight:700,color:C.primary,fontSize:14}},s.name),
+            React.createElement("span",{style:{fontSize:11,color:C.muted}},`${submitted.length}日 / 合計${totalH.toFixed(1)}h`),
+            submitted.length===0&&React.createElement("span",{style:{fontSize:11,color:C.amber,background:C.amberLight,padding:"1px 8px",borderRadius:10}},"未入力"),
+          ),
+          submitted.length>0&&React.createElement("div",{style:{display:"flex",flexWrap:"wrap",gap:6}},
+            submitted.sort(([a],[b])=>a.localeCompare(b)).map(([dk,v])=>{
+              const d=new Date(dk);
+              const wds=["日","月","火","水","木","金","土"][d.getDay()];
+              const isRed=d.getDay()===0||d.getDay()===6||!!holidays[dk];
+              return React.createElement("div",{key:dk,style:{padding:"3px 10px",borderRadius:8,background:C.card,border:`1px solid ${C.border}`,fontSize:11}},
+                React.createElement("span",{style:{color:isRed?C.rose:C.muted,fontWeight:700}},`${d.getDate()}(${wds}) `),
+                React.createElement("span",{style:{color:C.text}},`${v.start}〜${v.end} `),
+                React.createElement("span",{style:{color:C.sage,fontWeight:700}},calcHours(v.start,v.end)+"h"),
+              );
+            })
+          )
+        );
+      })
+    );
+  }
+
+  // 設定タブ
+  function SettingsTab(){
+    return React.createElement("div",null,
+      React.createElement("div",{style:{fontWeight:700,marginBottom:16}},"月次設定"),
+      React.createElement("div",{style:{marginBottom:20}},
+        React.createElement("div",{style:{fontSize:12,color:C.muted,marginBottom:6}},"希望締切日"),
+        React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center"}},
+          React.createElement("input",{type:"date",style:{...inp,width:"auto"},value:dlInput,onChange:e=>setDlInput(e.target.value)}),
+          React.createElement("button",{style:btn(C.primary,false,true),onClick:()=>{saveDeadline({...fullDeadline,[mk]:dlInput});doSave();}},"保存"),
+          dlInput&&React.createElement("button",{style:btn(C.faint,false,true),onClick:()=>{setDlInput("");saveDeadline({...fullDeadline,[mk]:""});}},"クリア"),
+        )
+      ),
+    );
+  }
+
+  return React.createElement("div",{style:{minHeight:"100vh",background:C.bg}},
+    React.createElement(Wrap,null,
+      // ヘッダー
+      React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:16,flexWrap:"wrap"}},
+        React.createElement("button",{style:{...btn(C.faint,true,true)},onClick:()=>{setAdminOk(false);setMode("home");}},"← ログアウト"),
+        React.createElement(MonthNav,{year,month,setYear,setMonth}),
+        saveMsg&&React.createElement("span",{style:{fontSize:12,color:C.sage}},saveMsg),
+        React.createElement("div",{style:{marginLeft:"auto",display:"flex",gap:8}},
+          published
+            ?React.createElement("button",{style:btn(C.rose),onClick:()=>{savePublished({...fullPublished,[mk]:false});doSave("公開取消");}}, "公開取消")
+            :React.createElement("button",{style:btn(C.sage),onClick:()=>{savePublished({...fullPublished,[mk]:true});doSave("公開しました！");}}, "✓ 公開する"),
+          React.createElement("button",{style:btn(C.faint),onClick:()=>handlePrint(props)},"🖨 印刷"),
+        )
+      ),
+      published&&React.createElement("div",{style:{padding:"6px 14px",borderRadius:8,background:C.sageLight,border:`1px solid ${C.sage}44`,fontSize:12,color:C.sage,marginBottom:12}},"✓ このシフトは公開中です"),
+
+      // タブ
+      React.createElement("div",{style:{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}},
+        [["calendar","📅 カレンダー"],["requests","📋 希望一覧"],["staff","👥 スタッフ管理"],["settings","⚙ 設定"]].map(([k,l])=>
+          React.createElement("button",{key:k,style:{...btn(tab===k?C.primary:C.faint,tab!==k,true),padding:"6px 14px",fontSize:12},onClick:()=>setTab(k)},l)
+        )
+      ),
+
+      React.createElement("div",{style:card},
+        tab==="calendar"&&React.createElement(CalendarTab),
+        tab==="requests"&&React.createElement(RequestsTab),
+        tab==="staff"&&React.createElement(StaffTab),
+        tab==="settings"&&React.createElement(SettingsTab),
       )
     )
   );
-
-  // ==================== ADMIN PANEL ====================
-  if ((mode === "adminLogin") && adminOk) {
-    const unsubmitted = names.filter(n => !Object.keys((requests[n]||{})).some(k=>k.startsWith(mKey)));
-    return React.createElement(AdminPanel, {
-      year, month, setYear, setMonth, mKey, days, names, staffList, saveMsg,
-      requests, confirmed, published, deadline, adminTab, unsubmitted, holidays,
-      setAdminTab, setPub, setDL, setSL, setR, setC,
-      toggleConf, removeStaff, addStaff, handlePrint,
-      onLogout:()=>{ setAdminOk(false); setMode("home"); }
-    });
-  }
-
-  // ==================== VIEW ====================
-  if (mode === "view") return React.createElement("div", { style:{ minHeight:"100vh", background:"#f5f0ea" } },
-    React.createElement("div", { style: wrap },
-      React.createElement("div", { style: nav },
-        React.createElement("button", { style: s_btn("#c9b9a8",true,true), onClick:()=>setMode("home") }, "← 戻る"),
-        React.createElement(MonthNav, { year, month, setYear, setMonth }),
-      ),
-      !published
-        ? React.createElement("div", { style:{ ...s_card, textAlign:"center", padding:"48px 20px" } },
-            React.createElement("div", { style:{ fontSize:36, marginBottom:10 } }, "⏳"),
-            React.createElement("div", { style:{ color:"#8a7a70" } }, "シフトはまだ公開されていません"),
-          )
-        : React.createElement("div", { style: s_card },
-            React.createElement("div", { style:{ overflowX:"auto" } },
-              React.createElement("table", { style:{ borderCollapse:"collapse", width:"100%", fontSize:12 } },
-                React.createElement("thead", null,
-                  React.createElement("tr", null,
-                    React.createElement("th", { style:{ ...s_th, textAlign:"left" } }, "日"),
-                    React.createElement("th", { style: s_th }, "曜"),
-                    names.map(n => React.createElement("th", { key:n, style: s_th }, n))
-                  )
-                ),
-                React.createElement("tbody", null,
-                  days.map(({day,wd,isWE,isRed,isHoliday,holidayName}) => {
-                    const k = `${mKey}-${pad(day)}`;
-                    return React.createElement("tr", { key:day, style:{ background:isRed?"#fdf0ee":"transparent" } },
-                      React.createElement("td", { title: holidayName||"", style:{ ...s_td, fontWeight:700, color:isRed?"#c47a7a":"#4a3f35" } }, day + (isHoliday?"🎌":"")),
-                      React.createElement("td", { style:{ ...s_td, color:isRed?"#c47a7a":"#a08878" } }, wd),
-                      names.map(n => {
-                        const c = (confirmed[n]||{})[k];
-                        return React.createElement("td", { key:n, style: s_td },
-                          c ? React.createElement("span", { style: s_chip(SHIFT_COLORS["確定-"+c], CONFIRMED_BG[c]) }, c)
-                            : React.createElement("span", { style:{ color:"#d4c8be" } }, "—")
-                        );
-                      })
-                    );
-                  })
-                )
-              )
-            )
-          )
-    )
-  );
-
-  return null;
 }
 
-// ==================== ADMIN PANEL コンポーネント ====================
-function AdminPanel({ year, month, setYear, setMonth, mKey, days, names, staffList, saveMsg,
-  requests, confirmed, published, deadline, adminTab, unsubmitted,
-  setAdminTab, setPub, setDL, setSL, setR, setC,
-  toggleConf, removeStaff, addStaff, handlePrint, onLogout }) {
+// ==================== DAY EDITOR (モーダル) ====================
+function DayEditor({dk,shifts,updateShift,staffList,requests,doSave,onClose}){
+  const dayShift=shifts[dk]||{positions:[],assigned:{}};
+  const [positions,setPositions]=useState(dayShift.positions||[]);
+  const [assigned,setAssigned]=useState(dayShift.assigned||{});
+  const [newPosName,setNewPosName]=useState("");
+  const [newPosReq,setNewPosReq]=useState(1);
 
-  const [nsi, setNsi] = useState("");
-  const wrap = { maxWidth:960, margin:"0 auto", padding:"20px 16px" };
-  const nav = { display:"flex", gap:8, alignItems:"center", marginBottom:18, flexWrap:"wrap" };
+  const d=new Date(dk);
+  const wds=["日","月","火","水","木","金","土"][d.getDay()];
+  const label=`${d.getMonth()+1}/${d.getDate()}(${wds})`;
 
-  return React.createElement("div", { style:{ minHeight:"100vh", background:"#f5f0ea" } },
-    React.createElement("div", { style: wrap },
-      React.createElement("div", { style: nav },
-        React.createElement("button", { style: s_btn("#c9b9a8",true,true), onClick: onLogout }, "← ログアウト"),
-        React.createElement(MonthNav, { year, month, setYear, setMonth }),
-        saveMsg && React.createElement("span", { style:{ fontSize:12, color:"#7a9e87" } }, saveMsg),
-        React.createElement("div", { style:{ marginLeft:"auto", display:"flex", gap:8 } },
-          published
-            ? React.createElement("button", { style: s_btn("#c47a7a"), onClick:()=>setPub(false) }, "公開取消")
-            : React.createElement("button", { style: s_btn("#7a9e87"), onClick:()=>setPub(true) }, "✓ 公開する"),
-          React.createElement("button", { style: s_btn("#c9b9a8"), onClick: handlePrint }, "🖨 印刷"),
+  // その日に希望を出したスタッフ
+  const availableStaff=staffList.filter(s=>{
+    const r=(requests[s.id]||{})[dk];
+    return r&&r.start&&r.end;
+  });
+
+  function save(){
+    updateShift(dk,{positions,assigned});
+    doSave();
+  }
+
+  function addPosition(){
+    if(!newPosName.trim())return;
+    setPositions([...positions,{name:newPosName.trim(),required:newPosReq}]);
+    setNewPosName("");setNewPosReq(1);
+  }
+  function removePosition(i){
+    setPositions(positions.filter((_,j)=>j!==i));
+  }
+  function assignStaff(staffId,field,val){
+    setAssigned(prev=>({...prev,[staffId]:{...(prev[staffId]||{}), [field]:val}}));
+  }
+  function removeAssign(staffId){
+    setAssigned(prev=>{const n={...prev};delete n[staffId];return n;});
+  }
+
+  const totalRequired=positions.reduce((s,p)=>s+(p.required||0),0);
+  const totalAssigned=Object.keys(assigned).length;
+  const shortage=totalAssigned<totalRequired;
+
+  return React.createElement("div",{className:"modal-overlay",onClick:e=>{if(e.target===e.currentTarget)onClose();}},
+    React.createElement("div",{className:"modal"},
+      // ヘッダー
+      React.createElement("div",{style:{display:"flex",alignItems:"center",marginBottom:20}},
+        React.createElement("div",{style:{fontWeight:800,fontSize:18,fontFamily:"'Shippori Mincho',serif"}},label," シフト編集"),
+        React.createElement("button",{style:{marginLeft:"auto",...btn(C.faint,true,true)},onClick:onClose},"✕ 閉じる"),
+      ),
+
+      // ポジション設定
+      React.createElement("div",{style:{marginBottom:20}},
+        React.createElement("div",{style:{fontWeight:700,fontSize:13,marginBottom:10,color:C.text}},"📌 ポジション設定"),
+        positions.length===0&&React.createElement("div",{style:{fontSize:12,color:C.muted,marginBottom:8}},"ポジションがありません"),
+        positions.map((p,i)=>
+          React.createElement("div",{key:i,style:{display:"flex",gap:8,alignItems:"center",marginBottom:6,padding:"6px 10px",background:"#fdf5ef",borderRadius:8,border:`1px solid ${C.border}`}},
+            React.createElement("span",{style:{flex:1,fontWeight:700,fontSize:13}},p.name),
+            React.createElement("span",{style:{fontSize:12,color:C.muted}},`必要 `),
+            React.createElement("input",{type:"number",min:1,max:10,style:{...inp,width:50,padding:"3px 6px"},value:p.required,
+              onChange:e=>setPositions(positions.map((x,j)=>j===i?{...x,required:Number(e.target.value)||1}:x))}),
+            React.createElement("span",{style:{fontSize:12,color:C.muted}},"人"),
+            React.createElement("button",{style:btn(C.rose,false,true),onClick:()=>removePosition(i)},"✕"),
+          )
+        ),
+        React.createElement("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginTop:8}},
+          React.createElement("input",{style:{...inp,width:130},placeholder:"ポジション名（例:窓口）",value:newPosName,onChange:e=>setNewPosName(e.target.value),
+            onKeyDown:e=>{if(e.key==="Enter")addPosition();}}),
+          React.createElement("input",{type:"number",min:1,max:10,style:{...inp,width:60,padding:"6px 8px"},value:newPosReq,
+            onChange:e=>setNewPosReq(Number(e.target.value)||1)}),
+          React.createElement("span",{style:{fontSize:12,color:C.muted}},"人"),
+          React.createElement("button",{style:btn(C.primary,false,true),onClick:addPosition},"+ 追加"),
         )
       ),
-      published && React.createElement("div", { style:{ padding:"6px 14px", borderRadius:8, background:"#7a9e8722", border:"1px solid #0f766e44", fontSize:13, color:"#7a9e87", marginBottom:12 } }, "✓ このシフトは公開中です"),
 
-      // タブ
-      React.createElement("div", { style:{ display:"flex", gap:6, marginBottom:16, flexWrap:"wrap" } },
-        [["requests","希望一覧"],["confirm","シフト確定"],["staff","スタッフ管理"],["settings","設定"]].map(([k,l])=>
-          React.createElement("button", { key:k, style: s_btn(adminTab===k?"#b07d62":"#b09080", adminTab!==k, true), onClick:()=>setAdminTab(k) }, l)
-        )
-      ),
-
-      React.createElement("div", { style: s_card },
-
-        // 希望一覧
-        adminTab === "requests" && React.createElement("div", null,
-          unsubmitted.length > 0 && React.createElement("div", { style:{ padding:"8px 12px", borderRadius:8, background:"#c4956a18", border:"1px solid #fbbf2444", fontSize:12, color:"#c4956a", marginBottom:14 } },
-            `⚠ 未入力: ${unsubmitted.join("、")}`
+      // スタッフ割り当て
+      React.createElement("div",{style:{marginBottom:20}},
+        React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:10}},
+          React.createElement("div",{style:{fontWeight:700,fontSize:13,color:C.text}},"👤 スタッフ割り当て"),
+          React.createElement("span",{style:{fontSize:11,padding:"2px 8px",borderRadius:10,
+            background:shortage?C.roseLight:C.sageLight,color:shortage?C.rose:C.sage,fontWeight:700}},
+            `${totalAssigned}/${totalRequired}人`
           ),
-          names.length === 0 && React.createElement("div", { style:{ color:"#8a7a70", fontSize:13 } }, "まだ希望が入力されていません"),
-          names.map(name => {
-            const entries = days.map(({day,wd,isWE,isRed,holidayName,req: _r})=>{
-              const k=`${mKey}-${pad(day)}`;
-              const req=(requests[name]||{})[k];
-              return req ? {day,wd,isRed,holidayName,req} : null;
-            }).filter(Boolean);
-            return React.createElement("div", { key:name, style:{ marginBottom:20 } },
-              React.createElement("div", { style:{ fontWeight:800, color:"#b07d62", fontSize:14, marginBottom:8 } }, name),
-              entries.length === 0
-                ? React.createElement("div", { style:{ fontSize:12, color:"#8a7a70" } }, "未入力")
-                : React.createElement("div", { style:{ display:"flex", flexWrap:"wrap", gap:6 } },
-                    entries.map(({day,wd,isRed,holidayName,req})=>
-                      React.createElement("div", { key:day, title:holidayName||"", style:{ display:"flex", gap:4, alignItems:"center", padding:"3px 8px", borderRadius:6, background:"#fff9f5", border:"1px solid #e8ddd4", fontSize:12 } },
-                        React.createElement("span", { style:{ color:isRed?"#c47a7a":"#b8a898", fontWeight:700 } }, `${day}(${wd})${holidayName?"🎌":""}`),
-                        React.createElement("span", { style: s_chip(SHIFT_COLORS[req], SHIFT_COLORS[req]+"22") }, req)
-                      )
-                    )
-                  )
-            );
-          })
         ),
 
-        // シフト確定
-        adminTab === "confirm" && React.createElement("div", null,
-          React.createElement("div", { style:{ fontSize:12, color:"#a08878", marginBottom:12 } }, "希望を参考にしながら確定シフトを入力してください"),
-          names.length === 0 && React.createElement("div", { style:{ color:"#8a7a70", fontSize:13 } }, "スタッフがいません"),
-          names.map(name =>
-            React.createElement("div", { key:name, style:{ marginBottom:24 } },
-              React.createElement("div", { style:{ fontWeight:800, color:"#b07d62", fontSize:14, marginBottom:6 } }, name),
-              React.createElement("div", { style:{ overflowX:"auto" } },
-                React.createElement("table", { style:{ borderCollapse:"collapse", width:"100%", fontSize:11 } },
-                  React.createElement("thead", null,
-                    React.createElement("tr", null,
-                      React.createElement("th", { style:{ ...s_th, textAlign:"left", minWidth:28 } }, "日"),
-                      React.createElement("th", { style: s_th }, "曜"),
-                      React.createElement("th", { style:{ ...s_th, minWidth:60, color:"#8a7a70" } }, "希望"),
-                      CONFIRMED_TYPES.map(t => React.createElement("th", { key:t, style: s_th }, t))
+        // 希望を出したスタッフ
+        availableStaff.length===0&&React.createElement("div",{style:{fontSize:12,color:C.muted,marginBottom:8}},"この日に希望を出したスタッフがいません"),
+        availableStaff.map(s=>{
+          const req=(requests[s.id]||{})[dk];
+          const a=assigned[s.id];
+          const isAssigned=!!a;
+          return React.createElement("div",{key:s.id,style:{
+            padding:"8px 12px",borderRadius:10,marginBottom:6,
+            background:isAssigned?C.primaryLight:"#fdf8f3",
+            border:`1px solid ${isAssigned?C.primary:C.border}`,
+            display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",
+          }},
+            React.createElement("div",{style:{flex:1,minWidth:80}},
+              React.createElement("div",{style:{fontWeight:700,fontSize:13}},s.name),
+              React.createElement("div",{style:{fontSize:11,color:C.muted}},`希望: ${req.start}〜${req.end} (${calcHours(req.start,req.end)}h)`),
+            ),
+            isAssigned&&React.createElement("select",{style:{...inp,width:120,padding:"4px 6px"},value:a.position||"",
+              onChange:e=>assignStaff(s.id,"position",e.target.value)},
+              React.createElement("option",{value:""},"ポジション選択"),
+              positions.map(p=>React.createElement("option",{key:p.name,value:p.name},p.name))
+            ),
+            isAssigned&&React.createElement("div",{style:{display:"flex",gap:4,alignItems:"center"}},
+              React.createElement("select",{style:{...inp,width:80,padding:"4px 6px"},value:a.start||req.start,onChange:e=>assignStaff(s.id,"start",e.target.value)},
+                SLOTS.map(sl=>React.createElement("option",{key:sl,value:sl},sl))
+              ),
+              React.createElement("span",{style:{fontSize:11,color:C.muted}},"〜"),
+              React.createElement("select",{style:{...inp,width:80,padding:"4px 6px"},value:a.end||req.end,onChange:e=>assignStaff(s.id,"end",e.target.value)},
+                SLOTS.filter(sl=>!a?.start||slotToMinutes(sl)>slotToMinutes(a.start||req.start))
+                  .map(sl=>React.createElement("option",{key:sl,value:sl},sl)),
+                React.createElement("option",{value:"18:00"},"18:00")
+              ),
+            ),
+            React.createElement("button",{
+              style:btn(isAssigned?C.rose:C.primary,false,true),
+              onClick:()=>isAssigned?removeAssign(s.id):setAssigned(prev=>({...prev,[s.id]:{position:"",start:req.start,end:req.end}}))
+            },isAssigned?"外す":"割当"),
+          );
+        }),
+
+        // 希望なしスタッフも追加可能
+        staffList.filter(s=>!availableStaff.find(a=>a.id===s.id)).length>0&&
+          React.createElement("details",{style:{marginTop:8}},
+            React.createElement("summary",{style:{fontSize:11,color:C.muted,cursor:"pointer"}},"希望なしスタッフも追加する"),
+            React.createElement("div",{style:{paddingTop:8}},
+              staffList.filter(s=>!availableStaff.find(a=>a.id===s.id)).map(s=>{
+                const a=assigned[s.id];
+                const isAssigned=!!a;
+                return React.createElement("div",{key:s.id,style:{padding:"6px 12px",borderRadius:8,marginBottom:4,background:"#fdf8f3",border:`1px solid ${C.border}`,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+                  React.createElement("span",{style:{flex:1,fontWeight:700,fontSize:12}},s.name),
+                  isAssigned&&React.createElement("select",{style:{...inp,width:120,padding:"4px 6px"},value:a.position||"",onChange:e=>assignStaff(s.id,"position",e.target.value)},
+                    React.createElement("option",{value:""},"ポジション選択"),
+                    positions.map(p=>React.createElement("option",{key:p.name,value:p.name},p.name))
+                  ),
+                  isAssigned&&React.createElement("div",{style:{display:"flex",gap:4,alignItems:"center"}},
+                    React.createElement("select",{style:{...inp,width:80,padding:"4px 6px"},value:a.start||SLOTS[0],onChange:e=>assignStaff(s.id,"start",e.target.value)},
+                      SLOTS.map(sl=>React.createElement("option",{key:sl,value:sl},sl))
+                    ),
+                    React.createElement("span",{style:{fontSize:11,color:C.muted}},"〜"),
+                    React.createElement("select",{style:{...inp,width:80,padding:"4px 6px"},value:a.end||SLOTS[SLOTS.length-1],onChange:e=>assignStaff(s.id,"end",e.target.value)},
+                      SLOTS.filter(sl=>slotToMinutes(sl)>slotToMinutes(a.start||SLOTS[0]))
+                        .map(sl=>React.createElement("option",{key:sl,value:sl},sl)),
+                      React.createElement("option",{value:"18:00"},"18:00")
+                    ),
+                  ),
+                  React.createElement("button",{style:btn(isAssigned?C.rose:C.faint,false,true),
+                    onClick:()=>isAssigned?removeAssign(s.id):setAssigned(prev=>({...prev,[s.id]:{position:"",start:SLOTS[0],end:"18:00"}}))}
+                  ,isAssigned?"外す":"追加"),
+                );
+              })
+            )
+          )
+      ),
+
+      // 保存ボタン
+      React.createElement("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}},
+        React.createElement("button",{style:btn(C.faint,true),onClick:onClose},"キャンセル"),
+        React.createElement("button",{style:btn(C.primary),onClick:save},"💾 保存"),
+      )
+    )
+  );
+}
+
+// ==================== 印刷 ====================
+function handlePrint(props){
+  const {days,shifts,staffList,mk,year,month,deadline,staffMonthStats}=props;
+  const names=staffList.map(s=>s.name);
+  const html=`<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>${year}年${month+1}月 シフト表</title>
+<style>
+body{font-family:'Hiragino Kaku Gothic ProN','Meiryo',sans-serif;padding:20px;color:#1e293b;font-size:11px;}
+h1{font-size:16px;margin-bottom:4px;}
+.dl{font-size:10px;color:#64748b;margin-bottom:12px;}
+table{border-collapse:collapse;width:100%;}
+th{background:#7a6055;color:#fff;padding:5px 4px;text-align:center;font-size:10px;}
+td{border:1px solid #e2e8f0;padding:3px;text-align:center;font-size:10px;}
+.red{color:#c47a7a;font-weight:bold;}
+.we{background:#fff0ee;}
+.short{background:#fde8e8;}
+.chip{display:inline-block;padding:1px 4px;border-radius:3px;font-size:9px;font-weight:bold;background:#e0f2fe;color:#0369a1;}
+.summary{margin-top:16px;}
+.summary table{max-width:500px;}
+</style></head><body>
+<h1>${year}年${month+1}月 シフト表</h1>
+${deadline?`<div class="dl">希望締切：${deadline}</div>`:""}
+<table>
+<tr><th>日</th><th>曜</th><th>ポジション</th>${names.map(n=>`<th>${n}</th>`).join("")}</tr>
+${days.map(({day,wd,isRed,isHoliday,dk})=>{
+  const ds=shifts[dk]||{};
+  const pos=(ds.positions||[]).map(p=>p.name+"×"+p.required).join(" ");
+  const assigned=ds.assigned||{};
+  const totalR=(ds.positions||[]).reduce((s,p)=>s+(p.required||0),0);
+  const totalA=Object.keys(assigned).length;
+  const short=totalA<totalR&&totalR>0;
+  return `<tr class="${isRed?"we":""}${short?" short":""}">
+<td class="${isRed?"red":""}" style="font-weight:bold">${day}${isHoliday?"*":""}</td>
+<td class="${isRed?"red":""}">${wd}</td>
+<td style="font-size:9px;color:#666">${pos||""}</td>
+${staffList.map(s=>{const a=assigned[s.id];return`<td>${a?`<span class="chip">${a.position||""}</span><br>${a.start}〜${a.end}`:""}</td>`;}).join("")}
+</tr>`;}).join("")}
+</table>
+<div class="summary">
+<h2 style="font-size:12px;margin-bottom:6px">勤務時間サマリー</h2>
+<table><tr><th>名前</th><th>時間</th><th>給与</th><th>目標</th></tr>
+${staffList.map(s=>{const{totalHours,totalPay}=staffMonthStats(s.id);return`<tr><td>${s.name}</td><td>${totalHours.toFixed(1)}h</td><td>${totalPay.toLocaleString()}円</td><td>${s.targetHours||0}h</td></tr>`;}).join("")}
+</table></div>
+<p style="font-size:9px;color:#94a3b8;margin-top:10px">出力日：${new Date().toLocaleDateString("ja-JP")}</p>
+</body></html>`;
+  const w=window.open("","_blank");
+  w.document.write(html);w.document.close();
+  setTimeout(()=>{w.focus();w.print();},500);
+}
+
+// ==================== 公開ビュー ====================
+function PublicView(props){
+  const {setMode,mk,days,shifts,staffList,published,staffMonthStats,year,month,setYear,setMonth}=props;
+
+  return React.createElement("div",{style:{minHeight:"100vh",background:C.bg}},
+    React.createElement(Wrap,null,
+      React.createElement("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:14,flexWrap:"wrap"}},
+        React.createElement(BackBtn,{onClick:()=>setMode("home")}),
+        React.createElement(MonthNav,{year,month,setYear,setMonth}),
+      ),
+      !published
+        ?React.createElement("div",{style:{...card,textAlign:"center",padding:"48px 20px"}},
+            React.createElement("div",{style:{fontSize:32,marginBottom:8}},"⏳"),
+            React.createElement("div",{style:{color:C.muted}},"シフトはまだ公開されていません")
+          )
+        :React.createElement("div",null,
+            // カレンダービュー
+            React.createElement("div",{style:{...card,marginBottom:16}},
+              React.createElement("div",{style:{fontWeight:700,marginBottom:12}},`${year}年${month+1}月 確定シフト`),
+              React.createElement("div",{style:{overflowX:"auto"}},
+                React.createElement("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12,minWidth:500}},
+                  React.createElement("thead",null,
+                    React.createElement("tr",null,
+                      React.createElement("th",{style:{...th,textAlign:"left"}},"日"),
+                      React.createElement("th",{style:th},"曜"),
+                      staffList.map(s=>React.createElement("th",{key:s.id,style:th},s.name))
                     )
                   ),
-                  React.createElement("tbody", null,
-                    days.map(({day,wd,isWE,isRed,isHoliday,holidayName}) => {
-                      const k = `${mKey}-${pad(day)}`;
-                      const req = (requests[name]||{})[k];
-                      const conf = (confirmed[name]||{})[k];
-                      return React.createElement("tr", { key:day, style:{ background:isRed?"#fdf0ee":"transparent" } },
-                        React.createElement("td", { title: holidayName||"", style:{ ...s_td, fontWeight:700, color:isRed?"#c47a7a":"#4a3f35" } }, day + (isHoliday?"🎌":"")),
-                        React.createElement("td", { style:{ ...s_td, color:isRed?"#c47a7a":"#a08878" } }, wd),
-                        React.createElement("td", { style: s_td },
-                          req ? React.createElement("span", { style: s_chip(SHIFT_COLORS[req], SHIFT_COLORS[req]+"22") }, req)
-                              : React.createElement("span", { style:{ color:"#d4c8be" } }, "—")
-                        ),
-                        CONFIRMED_TYPES.map(t => {
-                          const active = conf === t;
-                          return React.createElement("td", { key:t, style: s_td },
-                            React.createElement("span", {
-                              onClick:()=>toggleConf(name,day,t),
-                              style:{
-                                display:"inline-block", padding:"2px 7px", borderRadius:5, cursor:"pointer",
-                                background: active ? CONFIRMED_BG[t] : "transparent",
-                                border: `1px solid ${active ? SHIFT_COLORS["確定-"+t] : "transparent"}`,
-                                color: active ? SHIFT_COLORS["確定-"+t] : "#c9b9a8",
-                                fontWeight: active ? 700 : 400, transition:"all 0.1s",
-                              }
-                            }, t)
+                  React.createElement("tbody",null,
+                    days.map(({day,wd,isRed,isHoliday,dk,holidayName})=>{
+                      const ds=shifts[dk]||{};
+                      const assigned=ds.assigned||{};
+                      return React.createElement("tr",{key:dk,style:{background:isRed?"#fdf0ee":"transparent"}},
+                        React.createElement("td",{style:{...td,fontWeight:700,color:isRed?C.rose:C.text},title:holidayName||""},day+(isHoliday?"🎌":"")),
+                        React.createElement("td",{style:{...td,color:isRed?C.rose:C.muted}},wd),
+                        staffList.map(s=>{
+                          const a=assigned[s.id];
+                          return React.createElement("td",{key:s.id,style:td},
+                            a?React.createElement("div",null,
+                              a.position&&React.createElement("div",{style:{fontSize:10,fontWeight:700,color:C.primary,background:C.primaryLight,borderRadius:4,padding:"1px 4px",marginBottom:1}},a.position),
+                              React.createElement("div",{style:{fontSize:10,color:C.muted}},`${a.start}〜${a.end}`)
+                            ):React.createElement("span",{style:{color:"#e0d5cc"}},"—")
                           );
                         })
                       );
@@ -578,56 +823,27 @@ function AdminPanel({ year, month, setYear, setMonth, mKey, days, names, staffLi
                   )
                 )
               )
-            )
-          )
-        ),
-
-        // スタッフ管理
-        adminTab === "staff" && React.createElement("div", null,
-          React.createElement("div", { style:{ fontWeight:700, marginBottom:14 } }, "スタッフ一覧"),
-          names.length === 0 && React.createElement("div", { style:{ color:"#8a7a70", fontSize:13, marginBottom:16 } }, "スタッフがいません"),
-          React.createElement("div", { style:{ display:"flex", flexDirection:"column", gap:8, marginBottom:20 } },
-            names.map(name =>
-              React.createElement("div", { key:name, style:{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 14px", borderRadius:8, background:"#fff9f5", border:"1px solid #e8ddd4" } },
-                React.createElement("span", { style:{ fontWeight:700, fontSize:14 } }, name),
-                React.createElement("div", { style:{ display:"flex", gap:6, alignItems:"center" } },
-                  React.createElement("span", { style:{ fontSize:11, color:"#8a7a70" } },
-                    `${Object.keys((requests[name]||{})).filter(k=>k.startsWith(mKey)).length}日分入力済`
-                  ),
-                  React.createElement("button", { style: s_btn("#c47a7a",false,true), onClick:()=>removeStaff(name) }, "削除")
-                )
+            ),
+            // 勤務時間サマリー（公開用：時間のみ、給与・時給なし）
+            React.createElement("div",{style:card},
+              React.createElement("div",{style:{fontWeight:700,marginBottom:12}},"勤務時間サマリー"),
+              React.createElement("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+                staffList.map(s=>{
+                  const {totalHours}=staffMonthStats(s.id);
+                  return React.createElement("div",{key:s.id,style:{padding:"8px 16px",borderRadius:10,background:C.card,border:`1px solid ${C.border}`,textAlign:"center",minWidth:80}},
+                    React.createElement("div",{style:{fontWeight:700,fontSize:13}},s.name),
+                    React.createElement("div",{style:{fontSize:18,fontWeight:800,color:C.primary,marginTop:2}},totalHours.toFixed(1)),
+                    React.createElement("div",{style:{fontSize:10,color:C.muted}},"時間"),
+                  );
+                })
               )
             )
-          ),
-          React.createElement("div", { style:{ fontWeight:700, marginBottom:8, fontSize:13 } }, "スタッフを追加"),
-          React.createElement("div", { style:{ display:"flex", gap:8 } },
-            React.createElement("input", {
-              style: s_input,
-              placeholder:"名前を入力してEnter",
-              value: nsi,
-              onChange: e => setNsi(e.target.value),
-              onKeyDown: e => { if(e.key==="Enter"&&nsi.trim()){ if(addStaff(nsi.trim())) setNsi(""); } }
-            }),
-            React.createElement("button", { style: s_btn("#b07d62"), onClick:()=>{ if(nsi.trim()){ if(addStaff(nsi.trim())) setNsi(""); } } }, "追加")
           )
-        ),
-
-        // 設定
-        adminTab === "settings" && React.createElement("div", null,
-          React.createElement("div", { style:{ fontWeight:700, marginBottom:14 } }, "希望締切日の設定"),
-          React.createElement("div", { style:{ display:"flex", gap:8, alignItems:"center" } },
-            React.createElement("input", {
-              type:"date", style:{ ...s_input, width:"auto" },
-              value: deadline, onChange: e => setDL(e.target.value)
-            }),
-            deadline && React.createElement("button", { style: s_btn("#c9b9a8",false,true), onClick:()=>setDL("") }, "クリア")
-          ),
-          React.createElement("div", { style:{ fontSize:12, color:"#8a7a70", marginTop:8 } }, "設定するとスタッフの画面に締切日と残り日数が表示されます")
-        )
-      )
     )
   );
 }
+
+
 
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
 </script>
